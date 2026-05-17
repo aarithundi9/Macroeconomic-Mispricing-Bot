@@ -1,0 +1,14 @@
+.env
+*.pem
+*.key
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.log
+opportunities.log
+trades_history.csv
+.venv/
+venv/
+.idea/
+.vscode/
