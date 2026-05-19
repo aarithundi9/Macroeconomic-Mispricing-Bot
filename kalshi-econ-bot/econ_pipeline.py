@@ -443,6 +443,177 @@ class TruflationSource(BaseEconSource):
         return []
 
 
+# ------------------------------------------------------------------ Cleveland Fed
+
+class ClevelandFedNowcastSource(BaseEconSource):
+    """Cleveland Fed daily inflation nowcast (CPI / Core CPI / PCE / Core PCE).
+
+    Their model has ~0.9 correlation with the eventual BLS print, making it
+    the strongest free real-time nowcast for KXCPI markets.
+
+    We read from a CSV the user manually drops into ``data/`` (Cleveland
+    Fed's site lacks a stable public download URL — the JSON endpoints power
+    a default historical example chart, not the live data). Filename pattern:
+    ``QuarterlyAnnualizedPercentChange-YYYY-qN.csv``. Columns:
+    ``Label,CPI Inflation,Core CPI Inflation,PCE Inflation,Core PCE Inflation``.
+
+    Values are stored in their native units (**quarterly annualized %**). The
+    strategy converts to MoM when needed: MoM ≈ quarterly_annualized / 12.
+    """
+
+    name = "cleveland_fed"
+    SERIES = {
+        "cpi_q_annualized":      "CPI Inflation",
+        "core_cpi_q_annualized": "Core CPI Inflation",
+        "pce_q_annualized":      "PCE Inflation",
+        "core_pce_q_annualized": "Core PCE Inflation",
+    }
+
+    def _latest_csv(self) -> str | None:
+        """Find the most recently modified Cleveland Fed CSV in the data dir."""
+        import os
+        from pathlib import Path
+
+        csv_dir = Path(config.CLEVELAND_FED_CSV_DIR)
+        if not csv_dir.exists():
+            log.debug("Cleveland Fed: CSV dir %s missing; skipping.", csv_dir)
+            return None
+        candidates = list(csv_dir.glob("*.csv"))
+        if not candidates:
+            log.debug("Cleveland Fed: no CSV files in %s; skipping.", csv_dir)
+            return None
+        # Newest file wins — user typically re-downloads to refresh.
+        latest = max(candidates, key=lambda p: os.path.getmtime(p))
+        return str(latest)
+
+    def fetch(self) -> list[dict[str, Any]]:
+        path = self._latest_csv()
+        if path is None:
+            return []
+
+        import csv as _csv
+        observations: list[dict[str, Any]] = []
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                reader = _csv.DictReader(fh)
+                rows = list(reader)
+        except (OSError, _csv.Error) as exc:
+            log.error("Cleveland Fed CSV read failed (%s): %s", path, exc)
+            return []
+
+        if not rows:
+            log.warning("Cleveland Fed CSV %s is empty.", path)
+            return []
+
+        # Use the most recent row in the file (CSV is chronological).
+        last = rows[-1]
+        label = last.get("Label", "").strip()
+        # Label is "MM/DD" — combine with the year from the filename if present.
+        year = datetime.now(timezone.utc).year
+        try:
+            import re as _re
+            m = _re.search(r"-(\d{4})-", path)
+            if m:
+                year = int(m.group(1))
+        except Exception:
+            pass
+        period = f"{year}-{label.replace('/', '-')}" if label else datetime.now(timezone.utc).date().isoformat()
+
+        for series_label, csv_column in self.SERIES.items():
+            raw = last.get(csv_column)
+            if raw is None or raw == "":
+                continue
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                log.warning("Cleveland Fed: non-numeric %s = %r", csv_column, raw)
+                continue
+            obs = {
+                "series": series_label, "period": period,
+                "value": value, "raw": {"row": last, "source_file": path},
+            }
+            self.store_observations(series_label, [obs])
+            observations.append(obs)
+
+        log.info("Cleveland Fed: stored %d nowcasts as of %s (from %s)",
+                 len(observations), period, path)
+        return observations
+
+    def estimate(self) -> list[EconEstimate]:
+        """No direction-only estimate; nowcast consumed via ``cpi_nowcast()``."""
+        return []
+
+
+# ------------------------------------------------------------------ yfinance
+
+class YFinanceSource(BaseEconSource):
+    """Live market data via yfinance (Yahoo Finance scraper).
+
+    Pulls daily close prices for tradeable assets. WTI front-month futures
+    (``CL=F``) replaces FRED's ``DCOILWTICO`` since FRED has a ~1-day lag
+    that anchors stale prices in the strike-history distribution.
+    """
+
+    name = "yfinance"
+    SERIES = {
+        "oil": "CL=F",  # WTI front-month futures, NYMEX
+    }
+
+    def fetch(self) -> list[dict[str, Any]]:
+        try:
+            import yfinance as yf
+        except ImportError:
+            log.warning("yfinance not installed; run: pip install yfinance")
+            return []
+
+        observations: list[dict[str, Any]] = []
+        for label, ticker in self.SERIES.items():
+            try:
+                hist = yf.Ticker(ticker).history(period="90d", interval="1d")
+            except Exception as exc:  # yfinance can raise many things
+                log.error("yfinance fetch failed for %s: %s", ticker, exc)
+                continue
+            if hist is None or hist.empty:
+                log.warning("yfinance returned empty history for %s", ticker)
+                continue
+
+            series_obs: list[dict[str, Any]] = []
+            for date, row in hist.iterrows():
+                try:
+                    close = float(row["Close"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                series_obs.append({
+                    "series": label,
+                    "period": date.strftime("%Y-%m-%d"),
+                    "value": close,
+                    "raw": {"close": close, "ticker": ticker},
+                })
+            self.store_observations(label, series_obs)
+            observations.extend(series_obs)
+            log.info("yfinance %s: stored %d daily closes (latest=%.2f)",
+                     ticker, len(series_obs),
+                     series_obs[-1]["value"] if series_obs else float("nan"))
+        return observations
+
+    def estimate(self) -> list[EconEstimate]:
+        """Direction-only estimate for oil (parallel to FREDSource.oil)."""
+        values = self.latest_values("oil", limit=30)
+        if len(values) < 5:
+            return []
+        ups = sum(1 for a, b in zip(values[:-1], values[1:]) if a > b)
+        total = len(values) - 1
+        prob_up = ups / total if total else 0.5
+        est = EconEstimate(
+            category="oil",
+            probability=prob_up,
+            confidence=min(1.0, total / 30.0),
+            rationale=f"yfinance WTI CL=F: {ups}/{total} recent days printed above prior",
+        )
+        self.save_estimate(est)
+        return [est]
+
+
 # ------------------------------------------------------------------ Fed calendar
 
 class FedCalendarSource(BaseEconSource):
@@ -491,6 +662,8 @@ class EconPipeline:
             FREDSource(self.conn),
             FedCalendarSource(self.conn),
             TruflationSource(self.conn),
+            ClevelandFedNowcastSource(self.conn),
+            YFinanceSource(self.conn),
         ]
 
     def refresh(self, force: bool = False) -> None:
@@ -536,7 +709,7 @@ class EconPipeline:
         "payrolls":       ("bls",        "payrolls",     "diff"),
         "unemployment":   ("bls",        "unemployment", "random_walk"),
         "fed_rate":       ("fred",       "fed_rate",     "random_walk"),
-        "oil":            ("fred",       "oil",          "random_walk"),
+        "oil":            ("yfinance",   "oil",          "random_walk"),
         "gdp":            ("fred",       "gdp",          "as_is"),
         # KXTRUFCPI settles on the Truflation index itself; the single latest
         # reading *is* the strike unit. We keep an ``as_is`` spec here so the
@@ -556,6 +729,30 @@ class EconPipeline:
         if not row:
             return None
         return (float(row["value"]), str(row["period"]))
+
+    def cpi_nowcast_mom(self) -> tuple[float, str] | None:
+        """Return ``(MoM_pct, as_of_date)`` of the latest CPI nowcast.
+
+        Prefers Cleveland Fed (quarterly annualized → divided by 12 for MoM).
+        Falls back to Truflation YoY (÷12, rough approximation) if Cleveland
+        Fed has no data yet. Returns ``None`` if neither source has data.
+        """
+        row = self.conn.execute(
+            "SELECT value, period FROM econ_observations "
+            "WHERE source='cleveland_fed' AND series='cpi_q_annualized' "
+            "ORDER BY fetched_at DESC LIMIT 1"
+        ).fetchone()
+        if row:
+            # Quarterly annualized → monthly: divide by 12 (rough but works
+            # because the quarterly figure is itself constructed from the
+            # implied monthly run rate of inflation).
+            return (float(row["value"]) / 12.0, str(row["period"]))
+
+        tru = self.truflation_nowcast()
+        if tru is not None:
+            yoy, as_of = tru
+            return (yoy / 12.0, as_of)
+        return None
 
     def strike_history(self, category: str, limit: int = 60) -> list[float]:
         """Return ``limit`` samples from the next-period predictive distribution

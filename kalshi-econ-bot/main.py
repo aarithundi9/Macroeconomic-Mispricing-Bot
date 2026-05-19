@@ -26,7 +26,7 @@ from econ_pipeline import EconPipeline, init_db
 from kalshi_client import KalshiAPIError, KalshiClient
 from logger import get_logger
 from paper_portfolio import PaperPortfolio
-from strategy import log_opportunities, scan_markets
+from strategy import log_opportunities, log_market_snapshots, scan_markets
 
 log = get_logger(__name__)
 
@@ -71,6 +71,10 @@ def run_once(
     # 4) Persist opportunities to CSV/log.
     if signals:
         log_opportunities(signals)
+
+    # 4b) Log all market snapshots for backtesting (even non-flagged ones).
+    if signals:
+        log_market_snapshots(signals)
 
     # 5) Paper-trade the fresh signals.
     opened = []

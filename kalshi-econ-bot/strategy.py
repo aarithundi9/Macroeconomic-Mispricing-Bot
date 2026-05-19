@@ -249,21 +249,29 @@ def evaluate_market(
     if strike is not None:
         history = pipeline.strike_history(category)
 
-        # Truflation nowcast integration:
-        # - KXTRUFCPI settles on Truflation directly → center μ on the current
+        # Real-time CPI nowcast integration:
+        # - KXCPI (BLS) → blend historical μ toward the Cleveland Fed MoM
+        #   nowcast (or Truflation as fallback). The nowcast has ~0.9
+        #   correlation with the BLS print, so weighting it heavily makes
+        #   the model responsive to current-month inflation pressure rather
+        #   than purely backward-looking.
+        # - KXTRUFCPI settles on Truflation directly → center μ on the live
         #   reading and tighten σ since the value is nearly known.
-        # - KXCPI (BLS) → blend historical μ toward the nowcast.
         # - Other categories → unaffected.
         mu_override: float | None = None
         sigma_scale = 1.0
-        nowcast = pipeline.truflation_nowcast() if category in ("cpi", "truflation_cpi") else None
+        nowcast = None
+        if category == "cpi":
+            nowcast = pipeline.cpi_nowcast_mom()
+        elif category == "truflation_cpi":
+            nowcast = pipeline.truflation_nowcast()
         if nowcast is not None:
             nc_value, _ = nowcast
             if category == "truflation_cpi":
                 mu_override = nc_value
                 sigma_scale = 0.3
             elif category == "cpi":
-                w = config.TRUFLATION_NOWCAST_WEIGHT
+                w = config.CPI_NOWCAST_WEIGHT
                 hist_mu = statistics.fmean(history) if history else nc_value
                 mu_override = w * nc_value + (1.0 - w) * hist_mu
 
@@ -275,7 +283,8 @@ def evaluate_market(
             confidence = _confidence_from_sample(n)
             nc_tag = ""
             if nowcast is not None and category in ("cpi", "truflation_cpi"):
-                nc_tag = f" [truflation={nowcast[0]:.3f} @ {nowcast[1]}]"
+                src = "truflation" if category == "truflation_cpi" else "nowcast"
+                nc_tag = f" [{src}={nowcast[0]:.3f} @ {nowcast[1]}]"
             rationale = (
                 f"strike-model {category}: n={n}, mu={mu:.3f}, sigma={sigma:.3f}, "
                 f"strike={strike.type} {strike.floor}"
@@ -339,6 +348,11 @@ _CSV_FIELDS = [
     "our_probability", "edge", "confidence", "action", "category", "rationale",
 ]
 
+_SNAPSHOT_FIELDS = [
+    "timestamp", "market_ticker", "market_price", "our_probability", "edge",
+    "action", "category",
+]
+
 
 def log_opportunities(signals: Iterable[TradeSignal],
                       path: Path | None = None) -> int:
@@ -357,5 +371,33 @@ def log_opportunities(signals: Iterable[TradeSignal],
                 sig.market_ticker, sig.action, sig.market_price,
                 sig.our_probability, sig.edge, sig.market_title[:60],
             )
+            count += 1
+    return count
+
+
+def log_market_snapshots(signals: Iterable[TradeSignal],
+                         path: Path | None = None) -> int:
+    """Append market snapshots to CSV for backtesting.
+
+    Records every evaluated market signal so backtest can replay the full
+    market state and outcomes for strategy validation.
+    """
+    out = Path(path or config.PROJECT_ROOT / "market_snapshots.csv")
+    new_file = not out.exists()
+    count = 0
+    with out.open("a", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=_SNAPSHOT_FIELDS)
+        if new_file:
+            writer.writeheader()
+        for sig in signals:
+            writer.writerow({
+                "timestamp": sig.timestamp,
+                "market_ticker": sig.market_ticker,
+                "market_price": sig.market_price,
+                "our_probability": sig.our_probability,
+                "edge": sig.edge,
+                "action": sig.action,
+                "category": sig.category,
+            })
             count += 1
     return count

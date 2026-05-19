@@ -71,6 +71,20 @@ TRUFLATION_API_KEY: str = os.getenv("TRUFLATION_API_KEY", "")
 # checked backtested accuracy.
 TRUFLATION_NOWCAST_WEIGHT: float = 0.6
 
+# --- Cleveland Fed nowcast --------------------------------------------------
+#
+# Cleveland Fed publishes daily CPI/PCE nowcasts ("inflation nowcasting").
+# Their model has ~0.9 correlation with the eventual BLS print, making it the
+# strongest free real-time nowcast for KXCPI markets. We read whatever CSV
+# the user has dropped into ``data/`` (e.g. ``QuarterlyAnnualizedPercentChange
+# -2026-q2.csv``). Format: ``Label,CPI Inflation,Core CPI,PCE,Core PCE``.
+CLEVELAND_FED_CSV_DIR: Path = Path(__file__).resolve().parent.parent / "data"
+
+# Weight on the Cleveland Fed nowcast vs. historical BLS CPI distribution
+# when computing μ for KXCPI markets. Higher than Truflation's because the
+# nowcast is specifically designed to predict the BLS print.
+CPI_NOWCAST_WEIGHT: float = 0.7
+
 # --- Strategy ----------------------------------------------------------------
 
 EDGE_THRESHOLD: float = 0.10            # minimum absolute edge to flag a trade
