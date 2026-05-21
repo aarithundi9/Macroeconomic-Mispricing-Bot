@@ -1,3 +1,3 @@
 @echo off
 cd /d "C:\Users\aarit\OneDrive\Documents\GitHub\Kalshi"
-python kalshi-econ-bot\main.py >> kalshi-econ-bot\bot.log 2>&1
+"C:\Users\aarit\AppData\Local\Microsoft\WindowsApps\python.exe" kalshi-econ-bot\main.py >> kalshi-econ-bot\bot.log 2>&1

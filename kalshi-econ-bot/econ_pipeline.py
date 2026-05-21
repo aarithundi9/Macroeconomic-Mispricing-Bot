@@ -223,6 +223,10 @@ class BLSSource(BaseEconSource):
                     value = float(entry["value"])
                 except (TypeError, ValueError):
                     continue
+                # Convert payrolls from thousands (BLS units) to raw job counts
+                # so Kalshi strike thresholds align with the distribution.
+                if label == "payrolls":
+                    value *= 1000
                 period = f"{entry.get('year')}-{entry.get('period', '').lstrip('M')}"
                 observations.append({
                     "series": label, "period": period,
