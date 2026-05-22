@@ -45,7 +45,10 @@ SERIES_TO_CATEGORY: dict[str, str] = {
 }
 
 KALSHI_API_KEY: str = os.getenv("KALSHI_API_KEY", "")
-KALSHI_PRIVATE_KEY_PATH: str = os.getenv("KALSHI_PRIVATE_KEY_PATH", "./kalshi_private_key.pem")
+KALSHI_PRIVATE_KEY_PATH: str = os.getenv(
+    "KALSHI_PRIVATE_KEY_PATH",
+    str(Path(__file__).resolve().parent / "kalshi_private_key.pem")
+)
 KALSHI_PRIVATE_KEY_PASSWORD: str | None = os.getenv("KALSHI_PRIVATE_KEY_PASSWORD") or None
 
 # --- Economic data APIs ------------------------------------------------------
